@@ -245,11 +245,9 @@ function vHome(ym) {
     <div class="small teal" style="margin-top:2px">Payoff ${payoffLabel(fd.id)}</div></div></button>`;
   } else focusHtml = `<div class="card"><div class="pt">Focus debt</div><div class="mid mint">All debts paid 🎉</div></div>`;
   const sav = (setup().savings || []).map(s => `<div style="text-align:right"><div class="pt">${esc(s.name.replace('High Yield Savings', 'HYSA'))}</div><div class="mid mint" style="margin-top:2px">${s.approx ? '~' : ''}${money(S.savings[s.id] ?? s.balance, 0)}</div></div>`).join('');
-  const g = (setup().goals || [])[0];
-  let goalHtml = '';
-  if (g) { const saved = goalSaved(g); goalHtml = `<div class="card"><div class="row"><span class="pt">${esc(g.name)}</span>${g.status === 'pending' ? '<span class="pill teal">PLAN PENDING</span>' : ''}</div>
-    <div><b style="font-size:20px">${money(saved, 0)}</b> <span class="muted">of ${money(g.target, 0)}</span></div><div class="muted small" style="margin-top:-6px">${money(g.monthly, 0)}/mo · trip ${esc(g.when || '')}</div>${bar(saved, g.target, 8)}
-    ${ym >= g.from && ym <= g.to ? `<button class="btn sec" style="min-height:44px;padding:11px" data-act="goal" data-id="${g.id}" data-ym="${ym}">${S.goalPaid[ym + '|' + g.id] ? '✓ ' + money(g.monthly, 0) + ' saved for ' + mLabel(ym, true).split(' ')[0] : '+ Mark ' + money(g.monthly, 0) + ' saved this month'}</button>` : ''}</div>`; }
+  const goalHtml = (setup().goals || []).filter(g => g.status !== 'done').map(g => { const saved = goalSaved(g); return `<div class="card"><div class="row"><span class="pt">${esc(g.name)}</span>${g.status === 'pending' ? '<span class="pill teal">PLAN PENDING</span>' : saved >= g.target ? '<span class="pill teal">FUNDED</span>' : ''}</div>
+    <div><b style="font-size:20px">${money(saved, 0)}</b> <span class="muted">of ${money(g.target, 0)}</span></div><div class="muted small" style="margin-top:-6px">${money(g.monthly, 0)}/mo${g.from ? ' ' + esc(mLabel(g.from, true)) + (g.to && g.to !== g.from ? '–' + esc(mLabel(g.to, true)) : '') : ''} · trip ${esc(g.when || '')}</div>${bar(saved, g.target, 8)}
+    ${ym >= g.from && ym <= g.to ? `<button class="btn sec" style="min-height:44px;padding:11px" data-act="goal" data-id="${g.id}" data-ym="${ym}">${S.goalPaid[ym + '|' + g.id] ? '✓ ' + money(g.monthly, 0) + ' saved for ' + mLabel(ym, true).split(' ')[0] : '+ Mark ' + money(g.monthly, 0) + ' saved this month'}</button>` : ''}</div>`; }).join('');
   return hdr(mLabel(ym).split(' ')[0], 'Hi ' + esc(setup().owner || '') + ' · ' + (ym === curYM() ? now().toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) : mLabel(ym, true)), '<button class="icb" data-act="export" aria-label="Export month">⤓</button>', true) +
   `<button class="card" data-tab="spending" style="text-align:left"><div class="row"><span class="pt">Personal spending</span><span class="muted small">${di.left} days left</span></div>
    <div><span class="big ${P.spent > P.limit ? 'coral' : ''}">${money(P.spent)}</span> <span class="muted">of ${money(P.limit)}</span></div>${bar(P.spent, P.limit, 14)}
@@ -475,7 +473,7 @@ function buildExport(ym) {
   txFor(ym).sort((a, b) => a.date < b.date ? -1 : 1).forEach(t => rows.push([t.date, t.kind === 'work' ? 'work-reimbursable' : t.kind === 'fixed' ? 'fixed-other' : 'personal', t.kind === 'fixed' ? 'Fixed' : catName(t.cat), t.merchant, t.amount.toFixed(2), '', 'logged', t.src + (t.card ? ' / ' + t.card : '')]));
   F.bills.forEach(b => rows.push([ym + '-' + pad(Math.min(b.day, daysIn(ym))), b.debtId ? 'bill-loan-minimum' : 'bill', b.name, b.name, billAmt(b, ym).toFixed(2), b.amount.toFixed(2), billPaid(b, ym) ? 'paid' : 'due', b.autopay ? 'autopay' : 'auto-tick']));
   S.payments.filter(p => p.date.slice(0, 7) === ym).forEach(p => { const d = setup().debts.find(x => x.id === p.debtId) || {}; rows.push([p.date, 'debt-payment', d.name || p.debtId, (p.seg ? p.seg + ' · ' : '') + (p.note || 'payment'), p.amount.toFixed(2), (planPay(ym, p.debtId) || '').toString(), 'logged', 'manual']); });
-  const g = (setup().goals || [])[0]; if (g && S.goalPaid[ym + '|' + g.id]) rows.push([ym + '-28', 'savings', g.name, 'monthly contribution', g.monthly.toFixed(2), g.monthly.toFixed(2), 'saved', 'manual']);
+  const goals = setup().goals || []; goals.forEach(g => { if (S.goalPaid[ym + '|' + g.id]) rows.push([ym + '-28', 'savings', g.name, 'monthly contribution', g.monthly.toFixed(2), g.monthly.toFixed(2), 'saved', 'manual']); });
   const csv = rows.map(r => r.map(csvCell).join(',')).join('\n') + '\n';
   const fd = focusDebt(), sc = scenario(), over = P.cats.filter(c => c.spent > c.limit);
   const pays = S.payments.filter(p => p.date.slice(0, 7) === ym), loanMins = F.bills.filter(b => b.debtId && billPaid(b, ym)).reduce((a, b) => a + billAmt(b, ym), 0);
@@ -492,7 +490,8 @@ function buildExport(ym) {
   pays.forEach(p => { const d = setup().debts.find(x => x.id === p.debtId) || {}; L.push('  - ' + p.date + ' ' + (d.name || p.debtId) + ' ' + money(p.amount) + (p.note ? ' (' + p.note + ')' : '')); });
   if (fd) { const st = debtStatus(fd); L.push('  Focus: ' + fd.name + ' ' + money(st.bal) + ' left (' + Math.round(st.pct) + '% paid) · plan this month ' + money(planPay(ym, fd.id)) + ' · payoff ' + payoffLabel(fd.id)); }
   L.push('  All debt: ' + money(totalDebt()) + ' · debt-free ' + (sc ? mLabel(sc.debtFree, true) + ' est.' + (sc.pending ? ' (plan ' + sc.key.toUpperCase() + ', pending)' : '') : '—'));
-  if (g) L.push('', 'SAVINGS GOAL: ' + g.name + ' ' + money(goalSaved(g), 0) + ' of ' + money(g.target, 0) + (S.goalPaid[ym + '|' + g.id] ? ' · saved this month ✓' : ' · not marked this month'));
+  if (goals.length) L.push('', 'SAVINGS GOALS:');
+  goals.forEach(g => L.push('  - ' + g.name + ': ' + money(goalSaved(g), 0) + ' of ' + money(g.target, 0) + (ym >= g.from && ym <= g.to ? (S.goalPaid[ym + '|' + g.id] ? ' · ' + money(g.monthly, 0) + ' saved this month ✓' : ' · ' + money(g.monthly, 0) + ' not marked this month') : '')));
   (setup().savings || []).forEach(s => L.push(s.name + ': ' + money(S.savings[s.id] ?? s.balance, 0)));
   if (over.length) L.push('', 'FLAGS: over limit in ' + over.map(c => c.name + ' (' + Math.round(c.spent / c.limit * 100) + '%)').join(', '));
   L.push('', 'Exported from the budget tracker app. Send to Carlson for a reality check.');
