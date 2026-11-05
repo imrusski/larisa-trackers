@@ -570,7 +570,8 @@ function vToday() {
     h += `</div>`;
   });
   if ('ABCD'.includes(d.tpl)) h += `<div class="after banner b-warn" style="margin-top:12px"><b>Then sauna ~20 min at ~170 °F</b>Luteal or hot days: 15–20 min or 2 rounds with a cool-down. Leave at the first sign of dizziness. 0.5–1 L water + electrolytes after. Shorter on heavy period days.</div>`;
-  h += `<button class="btn" data-act="go-checkin">Finish → post-workout check-in</button></div>`;
+  h += `<button class="btn" data-act="go-checkin">Finish → post-workout check-in</button>`;
+  h += `<div class="row2"><button class="btn sec" data-act="mail-day">✉️ Email today</button><button class="btn sec" data-act="mail-all">✉️ Email full log</button></div></div>`;
   return h;
 }
 function seg(name, n0, n1, val) { let s = `<div class="seg" style="grid-template-columns:repeat(${n1 - n0 + 1},1fr)" data-seg="${name}">`; for (let i = n0; i <= n1; i++) s += `<button type="button" class="${+val === i && val !== '' && val != null ? 'on' : ''}" data-v="${i}">${i}</button>`; return s + '</div>'; }
@@ -734,6 +735,51 @@ function csvSets() {
       (e.sets || []).forEach((s, i) => { if (s) rows.push([...ctx(date), k.split('.')[0], e.id, ex.name, i + 1, s.w, s.r, s.d ? 1 : 0, e.rpe, e.lo, e.hi]); }); } }
   return csv(rows);
 }
+// ---------- "Email my log": mailto to Larisa. Line format: date | day | exercise | sets (units as stored: lb, reps/sec/min)
+const MAILTO = 'lpalari@gmail.com', MAIL_MAX = 1800;
+const mailClean = v => String(v == null ? '' : v).replace(/[|\r\n]+/g, ' ').trim();
+function mailDayName(date) { const d = planDay(date); return d ? (d.short || d.tpl || '') : ''; }
+function mailSets(e, ex) {
+  const u = ex.rl ? ex.rl : ex.kind === 'time' ? 'sec' : ex.kind === 'cardio' ? 'min' : 'reps';
+  const ss = (e.sets || []).filter(st => st && ((st.r !== '' && st.r != null) || (st.w !== '' && st.w != null)));
+  if (!ss.length) return e.done ? 'done' : '';
+  const r = st => (st.r === '' || st.r == null) ? '?' : st.r, w = st => (st.w === '' || st.w == null) ? null : st.w;
+  const unit = u === 'reps' ? '' : ' ' + u;
+  let out;
+  if (ss.every(st => r(st) === r(ss[0]) && w(st) === w(ss[0]))) out = `${ss.length}x${r(ss[0])}${unit}` + (w(ss[0]) != null ? ` @ ${w(ss[0])} lb` : '');
+  else if (ss.every(st => w(st) === w(ss[0]))) out = ss.map(st => `${r(st)}`).join(', ') + unit + (w(ss[0]) != null ? ` @ ${w(ss[0])} lb` : '');
+  else out = ss.map(st => `${r(st)}${unit}` + (w(st) != null ? `@${w(st)}` : '')).join(', ') + (ss.some(st => w(st) != null) ? ' lb' : '');
+  return out + (e.rpe ? ` | RPE ${e.rpe}` : '');
+}
+function mailLines(date) {
+  const lg = S.logs[date]; if (!lg) return [];
+  const day = mailClean(mailDayName(date)), L = [];
+  for (const k of Object.keys(lg.ex || {})) { const e = lg.ex[k], ex = P.ex[e.id] || {name: e.id}, v = mailSets(e, ex);
+    if (v) L.push(`${date} | ${day} | ${mailClean(ex.name)} | ${v}`); }
+  const c = lg.checkin; if (c && c.notes) L.push(`${date} | ${day} | NOTE | ${mailClean(c.notes)}`);
+  return L;
+}
+function mailUrl(subject, body) { return `mailto:${MAILTO}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`; }
+function mailGo(url) { window.location.href = url; }
+function mailDay(date) {
+  const L = mailLines(date); if (!L.length) { toast('Nothing logged on this day yet'); return; }
+  const day = mailDayName(date), body = ['#LOG v1', ...L, '#END'].join('\n');
+  let url = mailUrl(`Workout log · ${date} · ${day}`, body);
+  if (encodeURIComponent(body).length > MAIL_MAX) { mailCopy(body); url = mailUrl(`Workout log · ${date} · ${day}`, ['#LOG v1', '#TRUNCATED full text copied to clipboard', ...mailFit(L, 120)].join('\n')); }
+  mailGo(url);
+}
+function mailFit(L, extra) { const out = []; let n = extra; for (const l of L) { const c = encodeURIComponent(l + '\n').length; if (n + c > MAIL_MAX - 40) break; out.push(l); n += c; } if (out.length < L.length) out.push(`#MORE ${L.length - out.length} lines not shown`); return out; }
+function mailCopy(txt) { try { (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(() => toast('Copied, paste into the email'), () => toast('Could not copy: use Settings → Sets CSV')); } catch (e) {} }
+function mailAll() {
+  const dates = Object.keys(S.logs).sort(), L = [].concat(...dates.map(mailLines));
+  if (!L.length) { toast('Nothing logged yet'); return; }
+  const today = localToday(), subj = `Workout log · ${today} · full log`, body = ['#LOG v1', ...L, '#END'].join('\n');
+  if (encodeURIComponent(body).length <= MAIL_MAX) { mailGo(mailUrl(subj, body)); return; }
+  mailCopy(body);   // full text to the clipboard, then a compact one-line-per-day summary in the mail itself
+  const days = dates.filter(d => mailLines(d).length).map(d => { const lg = S.logs[d], n = Object.values(lg.ex || {}).filter(e => mailSets(e, P.ex[e.id] || {})).length, sets = Object.values(lg.ex || {}).reduce((a, e) => a + (e.sets || []).filter(st => st && st.r !== '' && st.r != null).length, 0);
+    return `${d} | ${mailClean(mailDayName(d))} | SUMMARY | ${n} exercises, ${sets} sets`; });
+  mailGo(mailUrl(subj, ['#LOG v1', '#COMPACT full log copied to clipboard: paste below', ...mailFit(days.reverse(), 160).reverse(), '#END'].join('\n')));
+}
 function importJson(text) {
   const d = JSON.parse(text); const s = d.data || d;
   if (!s || s.v !== 1 || typeof s.logs !== 'object') throw new Error('Not a backup from this app');
@@ -777,6 +823,8 @@ document.addEventListener('click', ev => {
   else if (a === 'exp-csv-ci') download(`larisa30_checkins_${localToday()}.csv`, csvCheckins(), 'text/csv');
   else if (a === 'exp-csv-sets') download(`larisa30_sets_${localToday()}.csv`, csvSets(), 'text/csv');
   else if (a === 'copy-json') { const txt = JSON.stringify({app: 'larisa30', version: P.version, data: S}); $('#out').value = txt; (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(() => toast('Copied ✓'), () => { $('#out').select(); toast('Select-all and copy from the box'); }); }
+  else if (a === 'mail-day') mailDay(ui.date || localToday());
+  else if (a === 'mail-all') mailAll();
   else if (a === 'clear') { if (confirm('Delete ALL logged data on this phone? Export first!')) { S = fresh(); save(); toast('Cleared'); render(); } }
 });
 document.addEventListener('change', ev => {
