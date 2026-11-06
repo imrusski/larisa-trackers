@@ -127,7 +127,7 @@ function toast(msg, ms) { const t = $('#toast'); t.innerHTML = msg; t.style.disp
 
 // ---------------- setup / state ----------------
 function newState(setup) {
-  const st = { setup: setup, tx: [], payments: [], billActual: {}, billOverride: {}, debtBase: {}, goalPaid: {}, savings: {}, notes: {}, focusDone: [], created: isoDate(now()) };
+  const st = { setup: setup, tx: [], payments: [], billActual: {}, billOverride: {}, billMeta: {}, billAdded: [], debtBase: {}, goalPaid: {}, savings: {}, notes: {}, focusDone: [], created: isoDate(now()) };
   (setup.bills || []).forEach(b => { if (b.actual) Object.keys(b.actual).forEach(ym => st.billActual[ym + '|' + b.id] = b.actual[ym]); });
   (setup.savings || []).forEach(s => st.savings[s.id] = s.balance);
   return st;
@@ -138,7 +138,7 @@ function acceptJSON(txt) {
   else if (j && j.type === 'budget-setup' && Array.isArray(j.bills) && Array.isArray(j.debts) && j.personal) {
     if (S && S.setup && !confirm('Replace the current setup? Logged spending is kept.')) return;
     const old = S; S = newState(j);
-    if (old) { S.tx = old.tx || []; S.payments = old.payments || []; S.billOverride = old.billOverride || {}; S.goalPaid = old.goalPaid || {}; Object.assign(S.billActual, old.billActual || {}); }
+    if (old) { S.tx = old.tx || []; S.payments = old.payments || []; S.billOverride = old.billOverride || {}; S.billMeta = old.billMeta || {}; S.billAdded = old.billAdded || []; S.goalPaid = old.goalPaid || {}; Object.assign(S.billActual, old.billActual || {}); }
   } else return err('This file is not a budget setup or backup file.');
   save(); ui.month = null; start(); toast('Setup loaded ✓');
   function err(m) { const e = $('#setupErr'); e.textContent = m; e.classList.remove('hidden'); }
@@ -148,8 +148,39 @@ $('#setupFile').addEventListener('change', ev => { const f = ev.target.files[0];
 // ---------------- computations ----------------
 const setup = () => S.setup;
 function billActive(b, ym) { return (!b.from || ym >= b.from) && (!b.until || ym <= b.until); }
-function billsFor(ym) { return setup().bills.filter(b => billActive(b, ym)).slice().sort((a, b) => a.day - b.day || 0); }
+function billMeta(id) { return (S.billMeta || {})[id] || {}; }
+function allBills() {
+  const ids = new Set((setup().bills || []).map(b => b.id));
+  return (setup().bills || []).concat((S.billAdded || []).filter(b => !ids.has(b.id)));
+}
+function billDef(b, ym) {
+  const e = billMeta(b.id); if (e.removed) return null;
+  const from = e.from != null ? e.from : b.from;
+  const until = e.until != null ? e.until : b.until;
+  const dayFrom = e.dayFrom || e.from || '0000-00';
+  const amtFrom = e.amountFrom || e.from || '0000-00';
+  const nameFrom = e.nameFrom || e.from || '0000-00';
+  return Object.assign({}, b, {
+    name: (e.name != null && ym >= nameFrom) ? e.name : b.name,
+    amount: (e.amount != null && ym >= amtFrom) ? e.amount : b.amount,
+    day: (e.day != null && ym >= dayFrom) ? e.day : b.day,
+    note: e.note != null ? e.note : b.note,
+    autopay: e.autopay != null ? e.autopay : b.autopay,
+    from, until,
+    edited: !!(e.name != null || e.amount != null || e.day != null || e.until != null || e.from != null || e.note != null || e.autopay != null),
+    added: !!(S.billAdded || []).find(x => x.id === b.id)
+  });
+}
+function billsFor(ym) {
+  return allBills().map(b => billDef(b, ym)).filter(b => b && billActive(b, ym)).sort((a, b) => a.day - b.day || 0);
+}
 function billAmt(b, ym) { const k = ym + '|' + b.id; return k in S.billActual ? S.billActual[k] : b.amount; }
+function debtMoneyLive(ym) {
+  const take = (setup().income && setup().income.takeHomeMonthly) || 0;
+  const pers = (setup().personal && setup().personal.limit) || 0;
+  const fixedEx = billsFor(ym).filter(b => !b.debtId).reduce((a, b) => a + b.amount, 0);
+  return r2(take - fixedEx - pers);
+}
 function billPaid(b, ym) {
   const k = ym + '|' + b.id; if (k in S.billOverride) return S.billOverride[k];
   const c = curYM(); if (ym < c) return true; if (ym > c) return false;
@@ -189,7 +220,7 @@ function debtStatus(d) {
   }
   S.payments.filter(p => p.debtId === d.id && p.date > base.asOf).sort((a, b) => a.date < b.date ? -1 : 1).forEach(p => apply(p.amount, p.seg));
   const today = isoDate(now());
-  setup().bills.filter(b => b.debtId === d.id).forEach(b => {
+  allBills().filter(b => b.debtId === d.id).forEach(raw => { const b = billDef(raw, curYM()) || raw;
     for (let ym = ymAdd(base.asOf.slice(0, 7), 0); ym <= curYM(); ym = ymAdd(ym, 1)) {
       if (!billActive(b, ym) || !billPaid(b, ym)) continue;
       const due = ym + '-' + pad(Math.min(b.day, daysIn(ym)));
@@ -210,7 +241,7 @@ function checkFocusAdvance() {
 }
 function categorize(desc) {
   const D = (desc || '').toUpperCase(); const R = setup().rules || {};
-  const bill = setup().bills.find(b => (b.match || []).some(k => D.includes(k)));
+  const bill = allBills().map(b => billDef(b, curYM()) || b).find(b => (b.match || []).some(k => D.includes(k)));
   if (bill) return { kind: 'fixed', billId: bill.id, cat: '' };
   if ((R.work || DEFAULT_WORK).some(k => D.includes(k))) return { kind: 'work', cat: guessCat(D) || 'fun' };
   return { kind: 'personal', cat: guessCat(D) || R.defaultCategory || setup().personal.categories.slice(-1)[0].id };
@@ -279,17 +310,20 @@ function vSpending(ym) {
   <div class="info"><b class="teal">Amex email auto-import</b><br>Optional, handled by Carlson, not by this app: turn on Amex purchase-alert <b>emails</b> and Carlson can read them from Gmail and send you a CSV to import. Phone push alerts can't be read.</div>`;
 }
 function vBills(ym) {
-  const F = fixed(ym);
+  const F = fixed(ym), dm = debtMoneyLive(ym), take = (setup().income && setup().income.takeHomeMonthly) || 0;
   const extra = txFor(ym).filter(t => t.kind === 'fixed');
   const mon = mLabel(ym, true).split(' ')[0];
-  return hdr('Bills', 'Fixed spending · ' + mLabel(ym, true), `<span class="muted small">${F.np}/${F.n} paid</span>`) +
-  `<div class="card"><div><span class="mid">${money(F.paid)}</span> <span class="muted">of ${money(F.total)} paid</span></div>${bar(F.paid, F.total, 12)}
-   <div class="muted small">Bills tick to paid automatically on their due day. Tap a bill to enter the actual amount.</div></div>
+  return hdr('Bills', 'Fixed spending · ' + mLabel(ym, true), `<button class="icb" data-act="addBill" aria-label="Add bill" style="font-size:22px">+</button>`) +
+  `<div class="card"><div class="row"><span class="muted small">${F.np}/${F.n} paid</span><span class="muted tiny">tap a bill to edit</span></div>
+   <div><span class="mid">${money(F.paid)}</span> <span class="muted">of ${money(F.total)} paid</span></div>${bar(F.paid, F.total, 12)}
+   <div class="muted small">Bills tick to paid on their due day. Tap one to enter this month's amount or change the default going forward.</div>
+   ${take ? `<div class="chip" style="margin-top:2px"><div class="l">Money for debt this month (live)</div><div class="v mint">${money(dm)}</div><div class="muted tiny">take-home ${money(take, 0)} − fixed excl. loans − personal ${money(setup().personal.limit, 0)}</div></div>` : ''}</div>
   <div class="card" style="gap:0;padding:4px 16px">${F.bills.map(b => { const p = billPaid(b, ym), a = billAmt(b, ym), diff = Math.abs(a - b.amount) > 0.004;
     return `<button class="li" data-act="bill" data-id="${b.id}"><div class="check ${p ? 'on' : ''}">${p ? '✓' : ''}</div><span class="muted tiny" style="width:46px">${mon} ${b.day}</span>
-    <span style="flex:1;min-width:0;font-size:14px;${p ? '' : 'font-weight:600'}">${esc(b.name)}${b.autopay ? ' <span class="pill" style="font-size:9.5px;padding:1px 6px">AUTOPAY</span>' : ''}</span>
+    <span style="flex:1;min-width:0;font-size:14px;${p ? '' : 'font-weight:600'}">${esc(b.name)}${b.autopay ? ' <span class="pill" style="font-size:9.5px;padding:1px 6px">AUTOPAY</span>' : ''}${b.edited || b.added ? ' <span class="pill teal" style="font-size:9.5px;padding:1px 6px">' + (b.added ? 'ADDED' : 'EDITED') + '</span>' : ''}</span>
     <span style="text-align:right;font-weight:600;font-size:14px">${money(a)}${diff ? `<div class="muted tiny" style="font-weight:400">budget ${money(b.amount, 0)}</div>` : ''}</span></button>`; }).join('')}</div>
-  ${extra.length ? `<div class="card" style="gap:0;padding:6px 16px"><div class="pt" style="padding:8px 0">Other fixed charges</div>${extra.map(t => `<button class="li" data-act="tx" data-id="${t.id}"><span style="flex:1">${esc(t.merchant)}</span><b>${money(t.amount)}</b></button>`).join('')}</div>` : ''}`;
+  ${extra.length ? `<div class="card" style="gap:0;padding:6px 16px"><div class="pt" style="padding:8px 0">Other fixed charges</div>${extra.map(t => `<button class="li" data-act="tx" data-id="${t.id}"><span style="flex:1">${esc(t.merchant)}</span><b>${money(t.amount)}</b></button>`).join('')}</div>` : ''}
+  <button class="btn sec" data-act="addBill">+ Add a fixed bill</button>`;
 }
 function vDebt(ym) {
   const fd = focusDebt(), rest = ranked().filter(d => d !== fd), full = setup().debts.filter(d => d.autopayFull), sc = scenario();
@@ -369,15 +403,47 @@ function saveAdd(id) {
   save(); closeSheet(); render(); toast(id ? 'Updated ✓' : 'Added ' + money(amt) + ' ✓');
 }
 function sheetBill(id) {
-  const ym = ui.month || curYM(), b = setup().bills.find(x => x.id === id), k = ym + '|' + id, p = billPaid(b, ym);
+  const ym = ui.month || curYM(), b = billsFor(ym).find(x => x.id === id) || billDef(allBills().find(x => x.id === id) || { id, name: id, amount: 0, day: 1 }, ym);
+  if (!b) { toast('Bill not found'); return; }
+  const k = ym + '|' + id, p = billPaid(b, ym);
   openSheet(`<div class="sh-t"><b>${esc(b.name)}</b><button class="muted" data-act="close">Close</button></div>
-   <div class="muted small">Due ${mLabel(ym, true).split(' ')[0]} ${ord(b.day)} · budget ${money(b.amount)}${b.autopay ? ' · autopay' : ''}${b.note ? ' · ' + esc(b.note) : ''}</div>
-   <label class="f">Actual amount this month<input id="bAmt" class="inp amt" inputmode="decimal" value="${billAmt(b, ym)}"></label>
-   <button class="btn" data-act="saveBill" data-id="${id}">Save amount</button>
+   <div class="muted small">Due ${mLabel(ym, true).split(' ')[0]} ${ord(b.day)} · budget ${money(b.amount)}${b.autopay ? ' · autopay' : ''}${b.note ? ' · ' + esc(b.note) : ''}${b.edited || b.added ? ' · edited on this phone' : ''}</div>
+   <label class="f">Actual amount this month only<input id="bAmt" class="inp amt" inputmode="decimal" value="${billAmt(b, ym)}"></label>
+   <button class="btn" data-act="saveBill" data-id="${id}">Save this month's amount</button>
    <div class="grid2"><button class="btn sec" data-act="billPaid" data-id="${id}" data-v="1">Mark paid</button><button class="btn sec" data-act="billPaid" data-id="${id}" data-v="0">Mark unpaid</button></div>
-   ${(k in S.billOverride || k in S.billActual) ? `<button class="btn danger" data-act="billReset" data-id="${id}">Reset to automatic</button>` : ''}
-   <div class="muted tiny">Status now: ${p ? 'paid' : 'not paid yet'}${k in S.billOverride ? ' (set by you)' : ' (automatic: paid once the due day arrives)'}</div>`);
+   ${(k in S.billOverride || k in S.billActual) ? `<button class="btn danger" data-act="billReset" data-id="${id}">Reset this month to automatic</button>` : ''}
+   <div class="muted tiny">Status now: ${p ? 'paid' : 'not paid yet'}${k in S.billOverride ? ' (set by you)' : ' (automatic: paid once the due day arrives)'}</div>
+   <div class="pt" style="margin-top:6px">Defaults going forward</div>
+   <button class="btn sec" data-act="editBill" data-id="${id}">Edit name, amount or due day</button>
+   <button class="btn danger" data-act="endBill" data-id="${id}">End bill after last month</button>`);
 }
+function sheetEditBill(id) {
+  const ym = ui.month || curYM();
+  const raw = allBills().find(x => x.id === id);
+  const b = billDef(raw || { id, name: '', amount: 0, day: 1 }, ym) || { id, name: '', amount: 0, day: 1 };
+  const e = billMeta(id);
+  openSheet(`<div class="sh-t"><b>Edit bill</b><button class="muted" data-act="close">Cancel</button></div>
+   <div class="muted small">Changes are saved on this phone only (on top of your setup file). Past months keep their old amounts unless you already overrode them.</div>
+   <label class="f">Name<input id="eName" class="inp" value="${esc(b.name)}"></label>
+   <label class="f">Default amount / mo<input id="eAmt" class="inp amt" inputmode="decimal" value="${b.amount}"></label>
+   <label class="f">Due day (1–31)<input id="eDay" class="inp" inputmode="numeric" value="${b.day}"></label>
+   <label class="f" style="flex-direction:row;align-items:center;gap:10px;color:var(--text)"><input id="eFrom" type="checkbox" checked style="width:22px;height:22px"> Apply amount &amp; due day from <b>${mLabel(ym, true)}</b> onward</label>
+   <div class="muted tiny">If unchecked, the new defaults apply to every month (setup baseline). This month\'s "actual amount" overrides still win.</div>
+   <button class="btn" data-act="saveEditBill" data-id="${id}">Save changes</button>
+   ${e.amount != null || e.day != null || e.name != null || e.until != null ? `<button class="btn danger" data-act="clearEditBill" data-id="${id}">Clear edits (back to setup file)</button>` : ''}`);
+}
+function sheetAddBill() {
+  const ym = ui.month || curYM();
+  openSheet(`<div class="sh-t"><b>Add a fixed bill</b><button class="muted" data-act="close">Cancel</button></div>
+   <div class="muted small">Added on this phone only. Starts ${mLabel(ym, true)} unless you set another month.</div>
+   <label class="f">Name<input id="nName" class="inp" placeholder="e.g. Storage unit"></label>
+   <label class="f">Amount / mo<input id="nAmt" class="inp amt" inputmode="decimal" placeholder="0.00"></label>
+   <label class="f">Due day (1–31)<input id="nDay" class="inp" inputmode="numeric" value="1"></label>
+   <label class="f">Starts (YYYY-MM)<input id="nFrom" class="inp" value="${ym}"></label>
+   <label class="f">Match keywords (optional, comma-separated)<input id="nMatch" class="inp" placeholder="MERCHANT NAME"></label>
+   <button class="btn" data-act="saveAddBill">Add bill</button>`);
+}
+function ymPrev(ym) { return ymAdd(ym, -1); }
 function sheetPay(id) {
   const d = setup().debts.find(x => x.id === id), st = debtStatus(d), ym = ui.month || curYM(), pp = planPay(ym, id);
   const list = S.payments.filter(p => p.debtId === id).slice().sort((a, b) => a.date < b.date ? 1 : -1).slice(0, 6);
@@ -536,6 +602,40 @@ document.addEventListener('click', e => {
     case 'saveBill': { const v = r2(parseFloat(($('#bAmt').value || '').replace(/[$,]/g, ''))); S.billActual[ym + '|' + id] = v; save(); closeSheet(); render(); checkFocusAdvance(); toast('Saved ✓'); break; }
     case 'billPaid': S.billOverride[ym + '|' + id] = el.dataset.v === '1'; save(); closeSheet(); render(); checkFocusAdvance(); break;
     case 'billReset': delete S.billOverride[ym + '|' + id]; delete S.billActual[ym + '|' + id]; save(); closeSheet(); render(); break;
+    case 'editBill': sheetEditBill(id); break;
+    case 'addBill': sheetAddBill(); break;
+    case 'saveEditBill': {
+      const name = ($('#eName').value || '').trim(), amt = r2(parseFloat(($('#eAmt').value || '').replace(/[$,]/g, ''))), day = parseInt($('#eDay').value, 10);
+      if (!name) { toast('Enter a name'); return; } if (!(amt >= 0) || isNaN(amt)) { toast('Enter an amount'); return; } if (!(day >= 1 && day <= 31)) { toast('Due day must be 1–31'); return; }
+      const fromHere = $('#eFrom').checked, e = Object.assign({}, billMeta(id));
+      const raw = allBills().find(x => x.id === id) || {};
+      if (name !== (raw.name || '')) { e.name = name; e.nameFrom = fromHere ? ym : (setup().startMonth || ym); }
+      else { delete e.name; delete e.nameFrom; }
+      if (Math.abs(amt - (raw.amount || 0)) > 0.004) { e.amount = amt; e.amountFrom = fromHere ? ym : (setup().startMonth || ym); }
+      else { delete e.amount; delete e.amountFrom; }
+      if (day !== (raw.day || 0)) { e.day = day; e.dayFrom = fromHere ? ym : (setup().startMonth || ym); }
+      else { delete e.day; delete e.dayFrom; }
+      if (!Object.keys(e).length) delete S.billMeta[id]; else S.billMeta[id] = e;
+      // if this is an added bill, also update the base record
+      const ai = (S.billAdded || []).findIndex(x => x.id === id);
+      if (ai >= 0) { S.billAdded[ai] = Object.assign({}, S.billAdded[ai], { name, amount: amt, day }); }
+      save(); closeSheet(); render(); toast('Bill updated ✓'); break;
+    }
+    case 'clearEditBill': delete S.billMeta[id]; save(); closeSheet(); render(); toast('Edits cleared'); break;
+    case 'endBill': {
+      if (!confirm('End this bill after last month? It will stop showing from ' + mLabel(ym, true) + ' onward. Past months stay as they were.')) return;
+      const e = Object.assign({}, billMeta(id), { until: ymPrev(ym) });
+      S.billMeta[id] = e; save(); closeSheet(); render(); toast('Bill ended ✓'); break;
+    }
+    case 'saveAddBill': {
+      const name = ($('#nName').value || '').trim(), amt = r2(parseFloat(($('#nAmt').value || '').replace(/[$,]/g, ''))), day = parseInt($('#nDay').value, 10), from = ($('#nFrom').value || ym).trim();
+      const match = ($('#nMatch').value || '').split(',').map(x => x.trim()).filter(Boolean);
+      if (!name) { toast('Enter a name'); return; } if (!(amt >= 0) || isNaN(amt)) { toast('Enter an amount'); return; } if (!(day >= 1 && day <= 31)) { toast('Due day must be 1–31'); return; }
+      if (!/^\d{4}-\d{2}$/.test(from)) { toast('Start month like 2026-11'); return; }
+      const nid = 'custom_' + uid();
+      S.billAdded = S.billAdded || []; S.billAdded.push({ id: nid, name, amount: amt, day, from, match: match.length ? match : undefined, note: 'added on phone' });
+      save(); closeSheet(); render(); toast('Added ' + name + ' ✓'); break;
+    }
     case 'pay': sheetPay(id); break;
     case 'savePay': { const v = r2(parseFloat(($('#pAmt').value || '').replace(/[$,]/g, ''))); if (!v) { toast('Enter an amount'); return; }
       S.payments.push({ id: uid(), debtId: id, seg: $('#pSeg') ? $('#pSeg').value : null, amount: v, date: $('#pDate').value || isoDate(now()), note: $('#pNote').value.trim() });
