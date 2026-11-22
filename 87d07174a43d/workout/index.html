@@ -124,7 +124,10 @@ body.shot nav.tabs,body.shot .toast{display:none}
 .wbtn{display:block;width:100%;margin-top:8px;border:1.5px solid #ffd0c7;background:#fff4f1;color:#c2410c;border-radius:12px;padding:9px 10px;font-size:14px;font-weight:800;text-align:center}
 .wbtn.sm{display:inline-block;width:auto;margin:0 6px 0 0;padding:5px 8px;font-size:12px;border-radius:10px;height:34px}
 .ex.timing{box-shadow:0 0 0 2px var(--str);background:#fffaf8}
-body.has-timer .app{padding-bottom:calc(196px + env(safe-area-inset-bottom))}
+body.has-timer .app{padding-bottom:calc(var(--tbh,124px) + 80px + env(safe-area-inset-bottom))}
+/* v3.1.1 iOS fix: --vvfix pulls the bottom bars back onto the visible screen when iOS leaves them stranded after the keyboard closes (see vvFix in JS) */
+nav.tabs,.tbar,.toast{translate:0 var(--vvfix,0px)}
+html.has-timer{scroll-padding-bottom:calc(var(--tbh,124px) + 80px + env(safe-area-inset-bottom))}
 .tbar{position:fixed;left:8px;right:8px;max-width:544px;margin:0 auto;bottom:calc(64px + env(safe-area-inset-bottom));z-index:12;color:#fff;border-radius:18px;padding:10px 12px 10px;
   background:linear-gradient(135deg,#0f766e,#14b8a6);box-shadow:0 8px 24px rgba(20,20,50,.25)}
 .tbar[hidden]{display:none}
@@ -1105,8 +1108,10 @@ let lastSec = null;
 function drawBar() {
   const bar = $('#tbar'); if (!bar) return;
   document.querySelectorAll('.ex.timing').forEach(e => e.classList.remove('timing'));
-  document.body.classList.toggle('has-timer', !!T);
+  document.body.classList.toggle('has-timer', !!T); document.documentElement.classList.toggle('has-timer', !!T);
   if (!T) { bar.hidden = true; lastSec = null; return; }
+  if (bar.hidden) { bar.hidden = false; vvFix.kick(); }
+  const tbh = bar.offsetHeight; if (tbh && tbh !== drawBar.tbh) { drawBar.tbh = tbh; document.documentElement.style.setProperty('--tbh', tbh + 'px'); }
   const p = T.ph[T.i], rem = remMs(), paused = T.rem != null, sec = Math.max(0, Math.ceil(rem / 1000));
   bar.hidden = false; bar.className = 'tbar tb-' + p.k + (paused ? ' paused' : '');
   const setTxt = T.set >= 0 ? ` · set ${T.set + 1}${T.n ? '/' + T.n : ''}` : '';
@@ -1290,6 +1295,30 @@ function cue(k, n, wait) {
   else if (k === 'warn10') buzz([40, 70, 40]);
   else if (k === 'done') buzz([220, 80, 220]);
 }
+// iOS 26+ WebKit bug: after the on-screen keyboard closes, position:fixed bars can stay where the keyboard-up
+// viewport put them (tab bar + rest timer stranded mid-screen, workout scrolling underneath). The CSS is correct;
+// WebKit keeps a stale viewport. Fix: once typing ends and scrolling settles, nudge the scroll position so WebKit
+// re-lays out fixed elements, then measure where the tab bar really is vs the bottom of the visible screen and
+// shift the bottom bars by the difference (--vvfix). No-op (0) in browsers that position them correctly.
+const vvFix = (() => {
+  const vv = window.visualViewport, root = document.documentElement; let shift = 0, t = 0;
+  const typing = () => { const a = document.activeElement; return !!a && a.matches('input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]),textarea,select,[contenteditable]'); };
+  const set = d => { if (d !== shift) { shift = d; root.style.setProperty('--vvfix', d + 'px'); } };
+  function apply() {
+    const nav = document.querySelector('nav.tabs'); if (!vv || !nav) return;
+    if (typing() || vv.scale > 1.01) { set(0); return; }        // keyboard up or pinch-zoomed: leave it to iOS
+    const at = nav.getBoundingClientRect().bottom - shift;      // where iOS put the bar, without our correction
+    const d = Math.round(vv.offsetTop + vv.height - at);        // bottom of what's actually on screen
+    set(Math.abs(d) < 8 ? 0 : d);
+  }
+  function settle(ms) { clearTimeout(t); t = setTimeout(apply, ms == null ? 150 : ms); }
+  function nudge() { setTimeout(() => { if (typing()) return; const x = scrollX, y = scrollY; scrollTo(x, y > 0 ? y - 1 : y + 1); scrollTo(x, y); settle(60); }, 120); }
+  if (vv) { vv.addEventListener('resize', () => settle()); vv.addEventListener('scroll', () => settle()); }
+  window.addEventListener('scroll', () => settle(), {passive: true});
+  ['resize', 'orientationchange', 'pageshow'].forEach(e => window.addEventListener(e, () => settle()));
+  document.addEventListener('focusout', nudge); document.addEventListener('visibilitychange', () => { if (!document.hidden) nudge(); });
+  return {kick: () => settle(0), apply, get shift() { return shift; }};
+})();
 setInterval(tick, 250);
 ['visibilitychange', 'pageshow', 'focus'].forEach(e => window.addEventListener(e, () => { if (!document.hidden) tick(); }));
 document.addEventListener('toggle', ev => { if (ev.target.matches && ev.target.matches('details[data-ill]') && ev.target.open) ILL.fit(ev.target); }, true);
