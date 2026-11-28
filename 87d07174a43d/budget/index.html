@@ -74,6 +74,7 @@ select.inp{appearance:none;-webkit-appearance:none}
 .warn{background:#FF6B6B14;border:1px solid #FF6B6B55;border-radius:14px;padding:11px 13px;font-size:13px;line-height:1.4}
 #setup{max-width:560px;margin:0 auto;padding:calc(var(--st) + 40px) 20px 40px;display:none;flex-direction:column;gap:14px}
 .hidden{display:none!important}
+.seg.tight button{font-size:12px;padding:10px 2px;line-height:1.2}
 </style>
 </head>
 <body>
@@ -105,6 +106,20 @@ select.inp{appearance:none;-webkit-appearance:none}
 const KEY = 'budgetTracker.v1';
 // Generic defaults only. Real data comes from the private setup file.
 const DEFAULT_WORK = ['UBER', 'LYFT'];
+const WORK_CATS = [
+  {id:'mie', name:'Meals & incidentals', short:'M&IE'},
+  {id:'lodging', name:'Lodging', short:'Lodging'},
+  {id:'airfare', name:'Airfare', short:'Airfare'},
+  {id:'ground', name:'Ground transport', short:'Ground'},
+  {id:'other', name:'Other', short:'Other'}
+];
+const WORK_KEYS = {
+  mieFirst: ['UBER EATS','UBER*EATS','UBEREATS','UBER* EATS','DOORDASH','GRUBHUB','POSTMATES'],
+  lodging: ['HOTEL','HILTON','MARRIOTT','HYATT','IHG','HOLIDAY INN','HAMPTON INN','HAMPTON BY','COURTYARD','WESTIN','SHERATON','RESIDENCE INN','AIRBNB','VRBO','BOOKING.COM','HOTELS.COM','MOTEL','LODGING','EXTENDED STAY','FAIRMONT','FOUR SEASONS','RITZ-CARLTON','RITZ CARLTON','WALDORF','KIMPTON','OMNI HOTEL','CROWNE PLAZA','DOUBLETREE','EMBASSY SUITES','SPRINGHILL','AC HOTEL','ALOFT','W HOTEL','BEST WESTERN','LA QUINTA','WYNDHAM','RAMADA','DAYS INN','SUPER 8','COMFORT INN','QUALITY INN','ECONO LODGE','INN & SUITES'],
+  airfare: ['BCD TRAVEL','AIRLINE','AIRWAYS','AIRLINES','UNITED AIR','UNITED.COM','DELTA AIR','DELTA.COM','AMERICAN AIR','AA.COM','SOUTHWEST','ALASKA AIR','JETBLUE','SPIRIT AIR','FRONTIER AI','HAWAIIAN AIR','AIR CANADA','BRITISH AIR','LUFTHANSA','AIR FRANCE','AIRFRANCE','KLM ','QANTAS','EMIRATES','CATHAY','SINGAPORE AIR','VIRGIN ATLANT','RYANAIR','EASYJET','JAPAN AIR','TURKISH AIR','QATAR AIR','ETIHAD','AEROMEXICO','LATAM','AVIANCA','KOREAN AIR','AER LINGUS','IBERIA','TAP AIR','FINNAIR','EL AL','AIR INDIA','AIR CHINA'],
+  ground: ['UBER','LYFT','TAXI','YELLOW CAB','HERTZ','ENTERPRISE RENT','ENTERPRISE CAR','AVIS ','BUDGET RENT','NATIONAL CAR','ALAMO ','ZIPCAR','AMTRAK','GREYHOUND','MEGABUS','CAR RENTAL','RENTAL CAR','SIXT','DOLLAR RENT','THRIFTY','TURO'],
+  mie: ['STARBUCKS','COFFEE','CAFE','CAFÉ','RESTAURANT','TST*','BISTRO','DINER','KITCHEN','PIZZA','SUSHI','BAKERY','GRILL','TAQUERIA','BREWERY','BREWPUB','FOOD TRUCK','CHIPOTLE','MCDONALD','PANERA','SWEETGREEN','SHAKE SHACK','TACO BELL','DUNKIN','PEET','BLUE BOTTLE']
+};
 let S = load();
 let ui = { tab: 'home', month: null, add: null, csv: null };
 const $ = s => document.querySelector(s);
@@ -127,7 +142,7 @@ function toast(msg, ms) { const t = $('#toast'); t.innerHTML = msg; t.style.disp
 
 // ---------------- setup / state ----------------
 function newState(setup) {
-  const st = { setup: setup, tx: [], payments: [], billActual: {}, billOverride: {}, billMeta: {}, billAdded: [], debtBase: {}, goalPaid: {}, savings: {}, notes: {}, focusDone: [], created: isoDate(now()) };
+  const st = { setup: setup, tx: [], payments: [], billActual: {}, billOverride: {}, billMeta: {}, billAdded: [], debtBase: {}, goalPaid: {}, savings: {}, notes: {}, focusDone: [], trips: [], created: isoDate(now()) };
   (setup.bills || []).forEach(b => { if (b.actual) Object.keys(b.actual).forEach(ym => st.billActual[ym + '|' + b.id] = b.actual[ym]); });
   (setup.savings || []).forEach(s => st.savings[s.id] = s.balance);
   return st;
@@ -138,8 +153,9 @@ function acceptJSON(txt) {
   else if (j && j.type === 'budget-setup' && Array.isArray(j.bills) && Array.isArray(j.debts) && j.personal) {
     if (S && S.setup && !confirm('Replace the current setup? Logged spending is kept.')) return;
     const old = S; S = newState(j);
-    if (old) { S.tx = old.tx || []; S.payments = old.payments || []; S.billOverride = old.billOverride || {}; S.billMeta = old.billMeta || {}; S.billAdded = old.billAdded || []; S.goalPaid = old.goalPaid || {}; Object.assign(S.billActual, old.billActual || {}); }
+    if (old) { S.tx = old.tx || []; S.payments = old.payments || []; S.billOverride = old.billOverride || {}; S.billMeta = old.billMeta || {}; S.billAdded = old.billAdded || []; S.goalPaid = old.goalPaid || {}; S.trips = old.trips || []; Object.assign(S.billActual, old.billActual || {}); }
   } else return err('This file is not a budget setup or backup file.');
+  if (S) migrateState(S);
   save(); ui.month = null; start(); toast('Setup loaded ✓');
   function err(m) { const e = $('#setupErr'); e.textContent = m; e.classList.remove('hidden'); }
 }
@@ -243,10 +259,103 @@ function categorize(desc) {
   const D = (desc || '').toUpperCase(); const R = setup().rules || {};
   const bill = allBills().map(b => billDef(b, curYM()) || b).find(b => (b.match || []).some(k => D.includes(k)));
   if (bill) return { kind: 'fixed', billId: bill.id, cat: '' };
-  if ((R.work || DEFAULT_WORK).some(k => D.includes(k))) return { kind: 'work', cat: guessCat(D) || 'fun' };
+  if ((R.work || DEFAULT_WORK).some(k => D.includes(k))) return { kind: 'work', cat: guessWorkCat(D) };
   return { kind: 'personal', cat: guessCat(D) || R.defaultCategory || setup().personal.categories.slice(-1)[0].id };
 }
 function guessCat(D) { const R = setup().rules || {}; for (const [cat, keys] of (R.categories || [])) if (keys.some(k => D.includes(k))) return cat; return ''; }
+function isWorkCat(id) { return WORK_CATS.some(c => c.id === id); }
+function workCatName(id) { return (WORK_CATS.find(c => c.id === id) || {}).name || 'Other'; }
+function diningKeys(st) {
+  const setupObj = (st && st.setup) || (S && S.setup) || {};
+  const row = ((setupObj.rules || {}).categories || []).find(x => x[0] === 'dining');
+  return (row && row[1]) || [];
+}
+function guessWorkCat(desc, st) {
+  const D = (desc || '').toUpperCase();
+  const mieAll = WORK_KEYS.mie.concat(diningKeys(st));
+  const order = [['mie', WORK_KEYS.mieFirst], ['lodging', WORK_KEYS.lodging], ['airfare', WORK_KEYS.airfare], ['ground', WORK_KEYS.ground], ['mie', mieAll]];
+  for (const [cat, keys] of order) if (keys.some(k => D.includes(String(k).toUpperCase()))) return cat;
+  return 'other';
+}
+function datesInRange(a, b) {
+  const out = [];
+  if (!a || !b || a > b) return out;
+  let cur = a;
+  while (cur <= b) {
+    out.push(cur);
+    let [y, m, d] = cur.split('-').map(Number);
+    d += 1;
+    const dim = new Date(y, m, 0).getDate();
+    if (d > dim) { d = 1; m += 1; if (m > 12) { m = 1; y += 1; } }
+    cur = y + '-' + pad(m) + '-' + pad(d);
+  }
+  return out;
+}
+function fmtRange(a, b) {
+  if (!a || !b) return '';
+  const pretty = iso => { const [y, m, d] = iso.split('-').map(Number); return MN[m - 1].slice(0, 3) + ' ' + d; };
+  return pretty(a) + '–' + pretty(b) + ', ' + a.slice(0, 4);
+}
+function tripById(id) { return (S.trips || []).find(t => t.id === id); }
+function autoTripId(date) {
+  const m = (S.trips || []).filter(t => t.start && t.end && date >= t.start && date <= t.end)
+    .sort((a, b) => a.start < b.start ? 1 : a.start > b.start ? -1 : 0);
+  return m.length ? m[0].id : '';
+}
+function txTripId(t) {
+  if (!t || t.kind !== 'work') return '';
+  if (t.tripOver) return t.tripId || '';
+  return autoTripId(t.date);
+}
+function tripTx(trip) { return (S.tx || []).filter(t => t.kind === 'work' && txTripId(t) === trip.id); }
+function workCatTotals(txs) {
+  const by = {}; WORK_CATS.forEach(c => by[c.id] = 0);
+  (txs || []).forEach(t => { const id = isWorkCat(t.cat) ? t.cat : 'other'; by[id] = r2((by[id] || 0) + t.amount); });
+  return by;
+}
+function tripStats(trip) {
+  const txs = tripTx(trip);
+  const days = datesInRange(trip.start, trip.end);
+  const rate = +trip.perDiem || 0;
+  const allow = r2(days.length * rate);
+  const byDay = {}; days.forEach(d => byDay[d] = 0);
+  let mie = 0, total = 0;
+  const byCat = workCatTotals(txs);
+  txs.forEach(t => {
+    total += t.amount;
+    if ((isWorkCat(t.cat) ? t.cat : 'other') === 'mie' && byDay[t.date] != null) { byDay[t.date] += t.amount; mie += t.amount; }
+    else if ((isWorkCat(t.cat) ? t.cat : 'other') === 'mie') mie += t.amount;
+  });
+  const dayRows = days.map(d => {
+    const spent = r2(byDay[d] || 0), diff = r2(rate - spent);
+    return { date: d, spent, rate, diff, over: spent > rate + 0.004 };
+  });
+  return { txs, days, rate, allow, mie: r2(mie), total: r2(total), byCat, dayRows, mieOver: mie > allow + 0.004, mieDiff: r2(allow - mie) };
+}
+function awaitingReimb() {
+  return r2((S.trips || []).filter(t => t.status !== 'reimbursed').reduce((a, t) => a + tripStats(t).total, 0));
+}
+function statusLabel(s) { return s === 'reimbursed' ? 'Reimbursed' : s === 'submitted' ? 'Submitted' : 'Not submitted'; }
+function workMonth(ym) {
+  const txs = txFor(ym).filter(t => t.kind === 'work');
+  return { total: r2(txs.reduce((a, t) => a + t.amount, 0)), byCat: workCatTotals(txs), txs };
+}
+function migrateState(st) {
+  if (!st) return st;
+  st.trips = st.trips || [];
+  (st.tx || []).forEach(t => { if (t.kind === 'work' && !isWorkCat(t.cat)) t.cat = guessWorkCat(t.merchant, st); });
+  return st;
+}
+function workCard(ym, from) {
+  const W = workMonth(ym), awaitAmt = awaitingReimb();
+  const cats = WORK_CATS.filter(c => (W.byCat[c.id] || 0) > 0.004)
+    .map(c => `<div class="row small"><span class="muted">${esc(c.name)}</span><b>${money(W.byCat[c.id])}</b></div>`).join('');
+  return `<button class="card" data-act="trips" data-from="${from || 'home'}" style="text-align:left"><div class="row"><span class="pt">Work · reimbursable</span><span class="muted small">trips ▸</span></div>
+   <div><span class="mid">${money(W.total)}</span> <span class="muted">this month</span></div>
+   <div class="muted tiny">tracked, not counted in your limit</div>
+   ${cats ? `<div style="display:flex;flex-direction:column;gap:5px;margin-top:2px">${cats}</div>` : ''}
+   <div class="row" style="margin-top:4px;padding-top:8px;border-top:1px solid #2B3B5C88"><span class="small">Awaiting reimbursement</span><b class="${awaitAmt ? 'teal' : ''}">${money(awaitAmt)}</b></div></button>`;
+}
 
 // ---------------- UI pieces ----------------
 function ring(pct, size, stroke, color, center, sub, csize) {
@@ -286,6 +395,7 @@ function vHome(ym) {
   <button class="card" data-tab="bills" style="text-align:left"><div class="row"><span class="pt">Fixed bills</span><span class="muted small">${F.np} of ${F.n} paid</span></div>
    <div><span class="mid">${money(F.paid)}</span> <span class="muted">of ${money(F.total)}</span></div>${bar(F.paid, F.total, 10)}
    <div class="muted small">${nxt ? 'Next: ' + esc(nxt.name) + ' ' + money(billAmt(nxt, ym)) + ' · ' + mLabel(ym, true).split(' ')[0] + ' ' + nxt.day : 'All bills paid this month ✓'}</div></button>
+  ${workCard(ym, 'home')}
   ${focusHtml}
   <div class="card" style="flex-direction:row;align-items:center;justify-content:space-between">
    <div><div class="pt">Debt-free</div><div class="mid" style="margin-top:2px">${sc ? mLabel(sc.debtFree, true) : '—'} <span class="small teal">est.</span></div>${sc && sc.pending ? '<div class="tiny muted">plan pending your OK</div>' : ''}</div>${sav}</div>
@@ -303,10 +413,10 @@ function vSpending(ym) {
    <div class="muted small">Month ${Math.round(di.pctGone)}% gone · ${P.spent <= P.limit ? money(P.limit - P.spent) + ' left' : money(P.spent - P.limit) + ' over'}</div></div>
   <div class="card" style="gap:8px"><div class="row"><span class="pt">Breakdown</span><button class="muted small" data-act="toggleBreak">${S.hideBreak ? 'show' : 'hide'}</button></div>
    ${S.hideBreak ? '' : P.cats.map(c => `<div style="display:flex;flex-direction:column;gap:6px;padding:3px 0"><div class="row" style="font-size:15px"><span style="font-weight:600">${esc(c.name)}</span><span><b class="${c.spent > c.limit ? 'coral' : ''}">${money(c.spent)}</b> <span class="muted">/ ${money(c.limit, 0)}</span></span></div>${bar(c.spent, c.limit, 8)}</div>`).join('')}</div>
-  <div class="card" style="flex-direction:row;justify-content:space-between;align-items:center"><div><div class="pt">Work · reimbursable</div><div class="muted tiny">tracked, not counted in your limit</div></div><b style="font-size:18px">${money(P.work)}</b></div>
+  ${workCard(ym, 'spending')}
   <div class="grid2"><button class="btn sec" data-act="csv">Import Amex CSV</button><button class="btn sec" data-act="add">+ Add</button></div>
   <div class="card" style="gap:0;padding:6px 16px"><div class="pt" style="padding:8px 0">This month · ${tx.length} entries</div>
-   ${tx.length ? tx.map(t => `<button class="li" data-act="tx" data-id="${t.id}"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.merchant || '—')}</div><div class="muted tiny">${t.date.slice(5).replace('-', '/')} · ${t.kind === 'work' ? 'Work (reimb.)' : t.kind === 'fixed' ? 'Fixed' : esc(catName(t.cat))}${t.src === 'csv' ? ' · CSV' : ''}</div></div><b class="${t.kind === 'work' ? 'muted' : ''}">${money(t.amount)}</b></button>`).join('') : '<div class="muted small" style="padding:10px 0 14px">Nothing yet. Tap + to add a spending or import an Amex CSV.</div>'}</div>
+   ${tx.length ? tx.map(t => `<button class="li" data-act="tx" data-id="${t.id}"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.merchant || '—')}</div><div class="muted tiny">${t.date.slice(5).replace('-', '/')} · ${t.kind === 'work' ? 'Work · ' + esc(workCatName(isWorkCat(t.cat) ? t.cat : 'other')) + (txTripId(t) && tripById(txTripId(t)) ? ' · ' + esc(tripById(txTripId(t)).name) : '') : t.kind === 'fixed' ? 'Fixed' : esc(catName(t.cat))}${t.src === 'csv' ? ' · CSV' : ''}</div></div><b class="${t.kind === 'work' ? 'muted' : ''}">${money(t.amount)}</b></button>`).join('') : '<div class="muted small" style="padding:10px 0 14px">Nothing yet. Tap + to add a spending or import an Amex CSV.</div>'}</div>
   <div class="info"><b class="teal">Amex email auto-import</b><br>Optional, handled by Carlson, not by this app: turn on Amex purchase-alert <b>emails</b> and Carlson can read them from Gmail and send you a CSV to import. Phone push alerts can't be read.</div>`;
 }
 function vBills(ym) {
@@ -352,10 +462,56 @@ function vDebt(ym) {
    <div class="muted tiny" style="text-align:center;padding:0 10px">Balances = last statement minus payments logged here and loan autopays. Interest isn't included, so update from statements now and then.</div>`;
   return html;
 }
+function vTrips() {
+  const trips = (S.trips || []).slice().sort((a, b) => (b.start || '') < (a.start || '') ? -1 : (b.start > a.start ? 1 : 0));
+  const awaitAmt = awaitingReimb();
+  const unattached = (S.tx || []).filter(t => t.kind === 'work' && !txTripId(t)).sort((a, b) => a.date < b.date ? 1 : -1);
+  const back = (ui.tripsFrom === 'trips' || ui.tripsFrom === 'trip') ? 'home' : (ui.tripsFrom || 'home');
+  let html = `<div class="hdr"><div><div class="sub">Reimbursement tracking</div><div class="t" style="gap:10px"><button class="icb" data-act="tripsBack" data-from="${back}" aria-label="Back" style="width:36px;height:36px;font-size:22px">‹</button> Work trips</div></div><button class="icb" data-act="addTrip" aria-label="Add trip">+</button></div>`;
+  html += `<div class="card"><div class="pt">Awaiting reimbursement</div><div class="big ${awaitAmt ? 'teal' : ''}">${money(awaitAmt)}</div><div class="muted small">On trips not yet marked reimbursed</div></div>`;
+  html += trips.length ? trips.map(t => {
+    const st = tripStats(t);
+    const pill = t.status === 'reimbursed' ? 'mint' : t.status === 'submitted' ? 'teal' : '';
+    return `<button class="card" data-act="openTrip" data-id="${t.id}" style="text-align:left"><div class="row"><span style="font-weight:700;font-size:17px">${esc(t.name)}</span><span class="pill ${pill}">${statusLabel(t.status)}</span></div>
+     <div class="muted small">${fmtRange(t.start, t.end)} · ${money(t.perDiem)}/day M&IE</div>
+     <div class="row"><span class="muted small">M&IE ${money(st.mie)} of ${money(st.allow)}</span><span class="tag${st.mieOver ? ' over' : ''}">${st.mieOver ? 'OVER' : 'UNDER'}</span></div>
+     ${bar(st.mie, st.allow, 8)}
+     <div class="row"><span class="muted small">Total reimbursable</span><b>${money(st.total)}</b></div></button>`;
+  }).join('') : `<div class="card"><div class="muted">No trips yet. Tap + to add one. Work charges dated inside a trip attach automatically.</div></div>`;
+  if (unattached.length) html += `<div class="card" style="gap:0;padding:6px 16px"><div class="pt" style="padding:8px 0">Unattached work charges</div>${unattached.map(t => `<button class="li" data-act="tx" data-id="${t.id}"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.merchant || '—')}</div><div class="muted tiny">${t.date.slice(5).replace('-', '/')} · ${esc(workCatName(isWorkCat(t.cat) ? t.cat : 'other'))}</div></div><b class="muted">${money(t.amount)}</b></button>`).join('')}</div>`;
+  return html;
+}
+function vTrip() {
+  const trip = tripById(ui.tripId);
+  if (!trip) return vTrips();
+  const st = tripStats(trip);
+  const catRows = WORK_CATS.map(c => `<div class="row"><span>${esc(c.name)}</span><b>${money(st.byCat[c.id] || 0)}</b></div>`).join('');
+  const dayRows = st.dayRows.map(d => {
+    const label = d.date.slice(5).replace('-', '/');
+    const flag = d.over ? `<span class="pill coral">OVER ${money(d.spent - d.rate)}</span>` : `<span class="pill mint">UNDER ${money(d.diff)}</span>`;
+    return `<div style="display:flex;flex-direction:column;gap:5px;padding:8px 0;border-bottom:1px solid #2B3B5C88"><div class="row" style="font-size:14px"><span style="font-weight:600">${label}</span><span><b class="${d.over ? 'coral' : ''}">${money(d.spent)}</b> <span class="muted">/ ${money(d.rate)}</span></span></div>${bar(d.spent, d.rate, 7)}<div class="row"><span class="muted tiny">M&IE vs per diem</span>${flag}</div></div>`;
+  }).join('');
+  const statuses = [['open', 'Not submitted'], ['submitted', 'Submitted'], ['reimbursed', 'Reimbursed']];
+  const seg = `<div class="seg tight" id="tripStatus">${statuses.map(([k, l]) => `<button data-act="tripStatus" data-id="${trip.id}" data-v="${k}" class="${(trip.status || 'open') === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const reimb = (trip.status || 'open') === 'reimbursed' ? `<div class="grid2"><label class="f">Reimbursed amount<input id="rAmt" class="inp" inputmode="decimal" value="${trip.reimbursedAmt != null ? esc(trip.reimbursedAmt) : st.total}"></label>
+    <label class="f">Reimbursed date<input id="rDate" type="date" class="inp" value="${esc(trip.reimbursedDate || isoDate(now()))}"></label></div>
+    <button class="btn sec" data-act="saveReimb" data-id="${trip.id}">Save reimbursement</button>` : '';
+  return `<div class="hdr"><div><div class="sub">${fmtRange(trip.start, trip.end)}</div><div class="t" style="gap:10px"><button class="icb" data-act="trips" aria-label="Back" style="width:36px;height:36px;font-size:22px">‹</button> ${esc(trip.name)}</div></div><button class="icb" data-act="editTrip" data-id="${trip.id}" aria-label="Edit trip" style="font-size:16px">✎</button></div>
+  <div class="card"><div class="pt">Status</div>${seg}${reimb}
+   <div class="muted small">${money(trip.perDiem)}/day M&IE · ${st.days.length} day${st.days.length === 1 ? '' : 's'} · full rate every day, including first and last</div></div>
+  <div class="card"><div class="row"><span class="pt">M&IE vs allowance</span><span class="tag${st.mieOver ? ' over' : ''}">${st.mieOver ? 'OVER' : 'UNDER'}</span></div>
+   <div><span class="mid ${st.mieOver ? 'coral' : ''}">${money(st.mie)}</span> <span class="muted">of ${money(st.allow)}</span></div>${bar(st.mie, st.allow, 10)}
+   <div class="muted small">${st.mieOver ? money(st.mie - st.allow) + ' over' : money(st.mieDiff) + ' under'} · ${st.days.length} × ${money(trip.perDiem)}</div></div>
+  <div class="card"><div class="row"><span class="pt">Total reimbursable</span><b class="mid">${money(st.total)}</b></div>${catRows}</div>
+  <div class="card" style="gap:0"><div class="pt" style="padding:4px 0 8px">Per day · Meals &amp; incidentals</div>${dayRows || '<div class="muted small">No travel days</div>'}</div>
+  <div class="card" style="gap:0;padding:6px 16px"><div class="pt" style="padding:8px 0">Charges · ${st.txs.length}</div>
+   ${st.txs.length ? st.txs.slice().sort((a, b) => a.date < b.date ? 1 : -1).map(t => `<button class="li" data-act="tx" data-id="${t.id}"><div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.merchant || '—')}</div><div class="muted tiny">${t.date.slice(5).replace('-', '/')} · ${esc(workCatName(isWorkCat(t.cat) ? t.cat : 'other'))}</div></div><b class="muted">${money(t.amount)}</b></button>`).join('') : '<div class="muted small" style="padding:10px 0 14px">No work charges in these dates yet.</div>'}</div>`;
+}
 function render() {
   if (!S || !S.setup) return;
   const ym = ui.month || curYM();
-  const v = { home: vHome, spending: vSpending, bills: vBills, debt: vDebt }[ui.tab](ym);
+  const views = { home: vHome, spending: vSpending, bills: vBills, debt: vDebt, trips: vTrips, trip: vTrip };
+  const v = (views[ui.tab] || vHome)(ym);
   $('#main').innerHTML = v;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === ui.tab));
 }
@@ -365,6 +521,17 @@ function openSheet(html) { $('#sheet').innerHTML = '<div class="grab"></div>' + 
 function closeSheet() { $('#sheetwrap').classList.remove('open'); $('#sheet').innerHTML = ''; }
 $('#sheetwrap').addEventListener('click', e => { if (e.target.id === 'sheetwrap') closeSheet(); });
 function catOptions(sel) { return setup().personal.categories.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join(''); }
+function workCatOptions(sel) { const s = isWorkCat(sel) ? sel : ''; return WORK_CATS.map(c => `<option value="${c.id}" ${c.id === s ? 'selected' : ''}>${esc(c.name)}</option>`).join(''); }
+function tripSelectOptions(t) {
+  const date = (t && t.date) || '';
+  const autoId = autoTripId(date);
+  const autoTrip = autoId && tripById(autoId);
+  const cur = t && t.tripOver ? (t.tripId || 'none') : 'auto';
+  const trips = (S.trips || []).slice().sort((a, b) => (b.start || '') < (a.start || '') ? -1 : 1);
+  return `<option value="auto" ${cur === 'auto' ? 'selected' : ''}>Auto${autoTrip ? ' · ' + esc(autoTrip.name) : ' · none'}</option><option value="none" ${cur === 'none' ? 'selected' : ''}>No trip</option>` +
+    trips.map(tr => `<option value="${tr.id}" ${cur === tr.id ? 'selected' : ''}>${esc(tr.name)} · ${fmtRange(tr.start, tr.end)}</option>`).join('');
+}
+function fillCatSelect(kind, sel) { const el = $('#aCat'); if (!el) return; el.innerHTML = kind === 'work' ? workCatOptions(sel) : catOptions(sel); }
 function sheetAdd(t) {
   const ym = ui.month || curYM(); const edit = !!t;
   t = t || { kind: 'personal', cat: setup().personal.categories[0].id, date: ym === curYM() ? isoDate(now()) : ym + '-01', card: (setup().cards || ['Credit card'])[0], amount: '', merchant: '' };
@@ -373,22 +540,34 @@ function sheetAdd(t) {
    <label class="f">Amount<input id="aAmt" class="inp amt" inputmode="decimal" placeholder="$0.00" value="${t.amount !== '' ? esc(t.amount) : ''}"></label>
    <label class="f">Merchant<input id="aMer" class="inp" placeholder="e.g. Grocery store" value="${esc(t.merchant)}" autocomplete="off"></label>
    <div class="f" style="display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)">Type<div class="seg" id="aKind">${[['personal', 'Personal'], ['fixed', 'Fixed'], ['work', 'Work reimb.']].map(([k, l]) => `<button data-kind="${k}" class="${t.kind === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
-   <label class="f" id="aCatWrap">Category<select id="aCat" class="inp">${catOptions(t.cat)}</select></label>
+   <label class="f" id="aCatWrap">Category<select id="aCat" class="inp">${t.kind === 'work' ? workCatOptions(t.cat) : catOptions(t.cat)}</select></label>
    <label class="f hidden" id="aBillWrap">Which bill?<select id="aBill" class="inp"><option value="">Other fixed charge</option>${billsFor(ym).map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select></label>
+   <label class="f hidden" id="aTripWrap">Trip<select id="aTrip" class="inp">${tripSelectOptions(t)}</select></label>
    <div class="grid2"><label class="f">Card<select id="aCard" class="inp">${(setup().cards || ['Credit card', 'Debit', 'Cash', 'Other']).map(c => `<option ${c === t.card ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
    <label class="f">Date<input id="aDate" type="date" class="inp" value="${t.date}"></label></div>
    <div class="muted small" id="aHint"></div>
    <button class="btn" data-act="saveAdd" data-id="${t.id || ''}">Save</button>
    ${edit ? '<button class="btn danger" data-act="delTx" data-id="' + t.id + '">Delete</button>' : ''}`);
   syncKind();
-  $('#aMer').addEventListener('input', () => { const g = categorize($('#aMer').value); if (!$('#aMer').value.trim()) return; if (g.kind === 'work') setKind('work'); if (g.kind === 'fixed') { setKind('fixed'); $('#aBill').value = g.billId; } if (g.cat && g.kind !== 'fixed') $('#aCat').value = g.cat; hint(); });
+  $('#aMer').addEventListener('input', () => { const g = categorize($('#aMer').value); if (!$('#aMer').value.trim()) return; if (g.kind === 'work') setKind('work'); if (g.kind === 'fixed') { setKind('fixed'); $('#aBill').value = g.billId; } if (ui.add.kind === 'work' || g.kind === 'work') { if ($('#aCat')) $('#aCat').value = guessWorkCat($('#aMer').value); } else if (g.cat && g.kind !== 'fixed') $('#aCat').value = g.cat; hint(); });
   $('#aAmt').addEventListener('input', hint);
+  if ($('#aDate')) $('#aDate').addEventListener('change', () => { if (ui.add.kind === 'work' && $('#aTrip')) { const keep = $('#aTrip').value; $('#aTrip').innerHTML = tripSelectOptions({ date: $('#aDate').value, tripOver: keep !== 'auto', tripId: keep === 'auto' || keep === 'none' ? '' : keep }); if ([].some.call($('#aTrip').options, o => o.value === keep)) $('#aTrip').value = keep; } hint(); });
   if (!edit) setTimeout(() => $('#aAmt').focus(), 50);
 }
 function setKind(k) { ui.add.kind = k; document.querySelectorAll('#aKind button').forEach(b => b.classList.toggle('on', b.dataset.kind === k)); syncKind(); }
-function syncKind() { const k = ui.add.kind; $('#aCatWrap').classList.toggle('hidden', k === 'fixed'); $('#aBillWrap').classList.toggle('hidden', k !== 'fixed'); hint(); }
+function syncKind() {
+  const k = ui.add.kind;
+  $('#aCatWrap').classList.toggle('hidden', k === 'fixed');
+  $('#aBillWrap').classList.toggle('hidden', k !== 'fixed');
+  if ($('#aTripWrap')) $('#aTripWrap').classList.toggle('hidden', k !== 'work');
+  if (k === 'work') fillCatSelect('work', isWorkCat($('#aCat') && $('#aCat').value) ? $('#aCat').value : guessWorkCat(($('#aMer') && $('#aMer').value) || (ui.add && ui.add.merchant) || '') || 'other');
+  else if (k === 'personal') fillCatSelect('personal', $('#aCat') && !isWorkCat($('#aCat').value) ? $('#aCat').value : ((setup().personal.categories[0] || {}).id));
+  hint();
+}
 function hint() { const a = parseFloat(($('#aAmt').value || '').replace(/[$,]/g, '')) || 0, k = ui.add.kind, ym = ui.month || curYM(); const P = personal(ym);
-  $('#aHint').innerHTML = k === 'personal' ? `After saving: Personal ${money(P.spent + a)} of ${money(P.limit)}` : k === 'work' ? 'Work-reimbursable: tracked, not counted in your limit.' : 'Counts toward this month\'s fixed bills.'; }
+  let workHint = 'Work-reimbursable: tracked, not counted in your limit.';
+  if (k === 'work' && $('#aDate')) { const tid = ($('#aTrip') && $('#aTrip').value === 'auto') ? autoTripId($('#aDate').value) : ($('#aTrip') && $('#aTrip').value !== 'none' ? $('#aTrip').value : ''); const tr = tid && tripById(tid); if (tr) workHint += ' Trip: ' + tr.name + '.'; }
+  $('#aHint').innerHTML = k === 'personal' ? `After saving: Personal ${money(P.spent + a)} of ${money(P.limit)}` : k === 'work' ? workHint : 'Counts toward this month\'s fixed bills.'; }
 function saveAdd(id) {
   const amt = r2(parseFloat(($('#aAmt').value || '').replace(/[$,]/g, '')));
   if (!amt) { toast('Enter an amount'); return; }
@@ -398,9 +577,42 @@ function saveAdd(id) {
     if (id) S.tx = S.tx.filter(t => t.id !== id);
     save(); closeSheet(); render(); toast('Bill marked paid ✓'); return;
   }
-  const t = { id: id || uid(), amount: amt, merchant: $('#aMer').value.trim(), kind: k, cat: k === 'fixed' ? '' : $('#aCat').value, card: $('#aCard').value, date, src: 'manual' };
-  if (id) S.tx = S.tx.map(x => x.id === id ? Object.assign(x, t) : x); else S.tx.push(t);
+  const t = { id: id || uid(), amount: amt, merchant: $('#aMer').value.trim(), kind: k, cat: k === 'fixed' ? '' : $('#aCat').value, card: $('#aCard').value, date, src: id ? (ui.add && ui.add.src) || 'manual' : 'manual', tripId: '', tripOver: false };
+  if (k === 'work') {
+    const tv = $('#aTrip') ? $('#aTrip').value : 'auto';
+    if (tv === 'auto') { t.tripOver = false; t.tripId = autoTripId(date) || ''; }
+    else if (tv === 'none') { t.tripOver = true; t.tripId = ''; }
+    else { t.tripOver = true; t.tripId = tv; }
+  }
+  if (id) S.tx = S.tx.map(x => x.id === id ? Object.assign({}, x, t) : x); else S.tx.push(t);
   save(); closeSheet(); render(); toast(id ? 'Updated ✓' : 'Added ' + money(amt) + ' ✓');
+}
+function sheetTrip(t) {
+  const edit = !!t;
+  t = t || { name: '', start: isoDate(now()), end: isoDate(now()), perDiem: '' };
+  openSheet(`<div class="sh-t"><b>${edit ? 'Edit trip' : 'New trip'}</b><button class="muted" data-act="close">Cancel</button></div>
+   <label class="f">Trip name<input id="tName" class="inp" placeholder="e.g. Austin offsite" value="${esc(t.name || '')}"></label>
+   <div class="grid2"><label class="f">Start date<input id="tStart" type="date" class="inp" value="${esc(t.start || '')}"></label>
+   <label class="f">End date<input id="tEnd" type="date" class="inp" value="${esc(t.end || '')}"></label></div>
+   <label class="f">Per diem, meals &amp; incidentals ($/day)<input id="tPerDiem" class="inp amt" inputmode="decimal" placeholder="0.00" value="${t.perDiem != null && t.perDiem !== '' ? esc(t.perDiem) : ''}"></label>
+   <div class="muted small">Full daily rate on every travel day, including the first and last. Lodging, airfare and ground transport are tracked separately and do not count against this limit. The rate is for this trip only: it changes by city.</div>
+   <button class="btn" data-act="saveTrip" data-id="${t.id || ''}">${edit ? 'Save trip' : 'Add trip'}</button>
+   ${edit ? '<button class="btn danger" data-act="delTrip" data-id="' + t.id + '">Delete trip</button>' : ''}`);
+  if (!edit) setTimeout(() => { const n = $('#tName'); if (n) n.focus(); }, 50);
+}
+function saveTrip(id) {
+  const name = ($('#tName').value || '').trim();
+  const start = $('#tStart').value, end = $('#tEnd').value;
+  const perDiem = r2(parseFloat(($('#tPerDiem').value || '').replace(/[$,]/g, '')));
+  if (!name) { toast('Enter a trip name'); return; }
+  if (!start || !end) { toast('Enter start and end dates'); return; }
+  if (end < start) { toast('End date is before the start date'); return; }
+  if (!(perDiem >= 0) || isNaN(perDiem)) { toast('Enter a per diem'); return; }
+  S.trips = S.trips || [];
+  if (id) S.trips = S.trips.map(t => t.id === id ? Object.assign({}, t, { name, start, end, perDiem }) : t);
+  else S.trips.push({ id: uid(), name, start, end, perDiem, status: 'open' });
+  const tid = id || S.trips[S.trips.length - 1].id;
+  save(); closeSheet(); ui.tab = 'trip'; ui.tripId = tid; render(); toast(id ? 'Trip updated ✓' : 'Trip added ✓');
 }
 function sheetBill(id) {
   const ym = ui.month || curYM(), b = billsFor(ym).find(x => x.id === id) || billDef(allBills().find(x => x.id === id) || { id, name: id, amount: 0, day: 1 }, ym);
@@ -517,10 +729,18 @@ function sheetCSV() {
 function csvPreview() {
   ui.csv = csvItems($('#csvText').value);
   if (!ui.csv.length) { $('#csvPrev').innerHTML = '<div class="warn">No charges found. Check that the CSV has Date, Description and Amount columns.</div>'; return; }
+  document.querySelectorAll('[data-csvk]').forEach(s => { if (ui.csv[+s.dataset.csvk]) ui.csv[+s.dataset.csvk].kind = s.value; });
+  document.querySelectorAll('[data-csvc]').forEach(s => { if (ui.csv[+s.dataset.csvc]) ui.csv[+s.dataset.csvc].cat = s.value; });
   const opts = it => [['personal', 'Personal'], ['work', 'Work'], ['fixed', 'Fixed'], ['skip', 'Skip']].map(([k, l]) => `<option value="${k}" ${it.kind === k ? 'selected' : ''}>${l}</option>`).join('');
+  const catSel = (it, i) => {
+    if (it.kind === 'work') { const c = isWorkCat(it.cat) ? it.cat : guessWorkCat(it.desc); return `<select class="inp" style="width:118px;min-height:40px;padding:6px 8px;font-size:12px" data-csvc="${i}">${workCatOptions(c)}</select>`; }
+    if (it.kind === 'personal') return `<select class="inp" style="width:104px;min-height:40px;padding:6px 8px;font-size:12px" data-csvc="${i}">${catOptions(it.cat)}</select>`;
+    return '';
+  };
   $('#csvPrev').innerHTML = `<div class="card" style="gap:0;padding:4px 12px;background:var(--bg)">${ui.csv.map((it, i) => `<div class="li" style="gap:8px"><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(it.desc)}</div><div class="muted tiny">${it.date.slice(5).replace('-', '/')} · ${money(it.amount)}${it.dup ? ' · already added' : ''}${it.refund ? ' · credit' : ''}</div></div>
-   <select class="inp" style="width:auto;min-height:40px;padding:6px 8px;font-size:13px" data-csvk="${i}">${opts(it)}</select>${it.kind === 'personal' || it.kind === 'work' ? `<select class="inp" style="width:104px;min-height:40px;padding:6px 8px;font-size:12px" data-csvc="${i}">${catOptions(it.cat)}</select>` : ''}</div>`).join('')}</div>
+   <select class="inp" style="width:auto;min-height:40px;padding:6px 8px;font-size:13px" data-csvk="${i}">${opts(it)}</select>${catSel(it, i)}</div>`).join('')}</div>
    <button class="btn" data-act="csvSave">Add ${ui.csv.filter(x => x.kind !== 'skip').length} charges</button>`;
+  document.querySelectorAll('[data-csvk]').forEach(s => s.addEventListener('change', ev => { const i = +ev.target.dataset.csvk; ui.csv[i].kind = ev.target.value; if (ui.csv[i].kind === 'work' && !isWorkCat(ui.csv[i].cat)) ui.csv[i].cat = guessWorkCat(ui.csv[i].desc); csvPreview(); }));
 }
 function csvSave() {
   document.querySelectorAll('[data-csvk]').forEach(s => ui.csv[+s.dataset.csvk].kind = s.value);
@@ -528,7 +748,9 @@ function csvSave() {
   let n = 0;
   ui.csv.forEach(it => { if (it.kind === 'skip') return; n++;
     if (it.kind === 'fixed' && it.billId) { const k = it.date.slice(0, 7) + '|' + it.billId; S.billActual[k] = it.amount; S.billOverride[k] = true; return; }
-    S.tx.push({ id: uid(), date: it.date, amount: it.amount, merchant: it.desc, kind: it.kind, cat: it.kind === 'fixed' ? '' : it.cat, card: 'Amex', src: 'csv' }); });
+    const row = { id: uid(), date: it.date, amount: it.amount, merchant: it.desc, kind: it.kind, cat: it.kind === 'fixed' ? '' : (it.kind === 'work' ? (isWorkCat(it.cat) ? it.cat : guessWorkCat(it.desc)) : it.cat), card: 'Amex', src: 'csv', tripId: '', tripOver: false };
+    if (it.kind === 'work') row.tripId = autoTripId(it.date) || '';
+    S.tx.push(row); });
   save(); closeSheet(); render(); toast(n + ' charges imported ✓');
 }
 // ---------------- export month ----------------
@@ -536,7 +758,7 @@ function csvCell(v) { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? 
 function buildExport(ym) {
   const P = personal(ym), F = fixed(ym), catName = id => (setup().personal.categories.find(c => c.id === id) || {}).name || '';
   const rows = [['date', 'type', 'category', 'description', 'amount', 'budget', 'status', 'source']];
-  txFor(ym).sort((a, b) => a.date < b.date ? -1 : 1).forEach(t => rows.push([t.date, t.kind === 'work' ? 'work-reimbursable' : t.kind === 'fixed' ? 'fixed-other' : 'personal', t.kind === 'fixed' ? 'Fixed' : catName(t.cat), t.merchant, t.amount.toFixed(2), '', 'logged', t.src + (t.card ? ' / ' + t.card : '')]));
+  txFor(ym).sort((a, b) => a.date < b.date ? -1 : 1).forEach(t => { const trip = t.kind === 'work' && txTripId(t) && tripById(txTripId(t)); const cat = t.kind === 'fixed' ? 'Fixed' : t.kind === 'work' ? workCatName(isWorkCat(t.cat) ? t.cat : 'other') : catName(t.cat); rows.push([t.date, t.kind === 'work' ? 'work-reimbursable' : t.kind === 'fixed' ? 'fixed-other' : 'personal', cat, t.merchant, t.amount.toFixed(2), '', 'logged' + (trip ? ' · ' + trip.name : ''), t.src + (t.card ? ' / ' + t.card : '')]); });
   F.bills.forEach(b => rows.push([ym + '-' + pad(Math.min(b.day, daysIn(ym))), b.debtId ? 'bill-loan-minimum' : 'bill', b.name, b.name, billAmt(b, ym).toFixed(2), b.amount.toFixed(2), billPaid(b, ym) ? 'paid' : 'due', b.autopay ? 'autopay' : 'auto-tick']));
   S.payments.filter(p => p.date.slice(0, 7) === ym).forEach(p => { const d = setup().debts.find(x => x.id === p.debtId) || {}; rows.push([p.date, 'debt-payment', d.name || p.debtId, (p.seg ? p.seg + ' · ' : '') + (p.note || 'payment'), p.amount.toFixed(2), (planPay(ym, p.debtId) || '').toString(), 'logged', 'manual']); });
   const goals = setup().goals || []; goals.forEach(g => { if (S.goalPaid[ym + '|' + g.id]) rows.push([ym + '-28', 'savings', g.name, 'monthly contribution', g.monthly.toFixed(2), g.monthly.toFixed(2), 'saved', 'manual']); });
@@ -547,7 +769,19 @@ function buildExport(ym) {
   L.push('Budget summary · ' + mLabel(ym) + (ym === curYM() ? ' (as of ' + isoDate(now()) + ')' : ''), '');
   L.push('PERSONAL SPENDING: ' + money(P.spent) + ' of ' + money(P.limit) + ' (' + Math.round(P.spent / P.limit * 100) + '%)');
   P.cats.forEach(c => L.push('  - ' + c.name + ': ' + money(c.spent) + ' / ' + money(c.limit) + (c.spent > c.limit ? '  OVER' : '')));
-  L.push('  Work-reimbursable (not counted): ' + money(P.work), '');
+  L.push('  Work-reimbursable (not counted): ' + money(P.work));
+  const Wm = workMonth(ym);
+  WORK_CATS.filter(c => (Wm.byCat[c.id] || 0) > 0.004).forEach(c => L.push('    - ' + c.name + ': ' + money(Wm.byCat[c.id])));
+  const trips = (S.trips || []).filter(t => t.start.slice(0, 7) <= ym && t.end.slice(0, 7) >= ym);
+  if ((S.trips || []).length) {
+    L.push('', 'WORK TRIPS:');
+    (S.trips || []).slice().sort((a, b) => (a.start || '') < (b.start || '') ? -1 : 1).forEach(t => {
+      const st = tripStats(t);
+      L.push('  - ' + t.name + ' (' + fmtRange(t.start, t.end) + '): M&IE ' + money(st.mie) + ' of ' + money(st.allow) + (st.mieOver ? '  OVER' : '') + ' · total ' + money(st.total) + ' · ' + statusLabel(t.status) + (t.status === 'reimbursed' && t.reimbursedAmt != null ? ' ' + money(t.reimbursedAmt) : ''));
+    });
+    L.push('  Awaiting reimbursement: ' + money(awaitingReimb()));
+  }
+  L.push('');
   L.push('FIXED BILLS: ' + F.np + ' of ' + F.n + ' paid · ' + money(F.paid) + ' of ' + money(F.total));
   F.bills.filter(b => Math.abs(billAmt(b, ym) - b.amount) > 0.004).forEach(b => L.push('  - ' + b.name + ': actual ' + money(billAmt(b, ym)) + ' vs budget ' + money(b.amount)));
   F.bills.filter(b => !billPaid(b, ym)).forEach(b => L.push('  - still due: ' + b.name + ' ' + money(billAmt(b, ym)) + ' on the ' + ord(b.day)));
@@ -595,6 +829,15 @@ document.addEventListener('click', e => {
     case 'setupPaste': acceptJSON($('#setupPaste').value); break;
     case 'close': closeSheet(); break;
     case 'add': sheetAdd(); break;
+    case 'trips': ui.tripsFrom = el.dataset.from || (ui.tab === 'trips' || ui.tab === 'trip' ? (ui.tripsFrom || 'home') : ui.tab); ui.tab = 'trips'; render(); window.scrollTo(0, 0); break;
+    case 'openTrip': ui.tab = 'trip'; ui.tripId = id; render(); window.scrollTo(0, 0); break;
+    case 'tripsBack': ui.tab = el.dataset.from || 'home'; render(); window.scrollTo(0, 0); break;
+    case 'addTrip': sheetTrip(); break;
+    case 'editTrip': sheetTrip(tripById(id)); break;
+    case 'saveTrip': saveTrip(id); break;
+    case 'delTrip': if (confirm('Delete this trip? Work charges stay in the log, unattached from the trip.')) { S.trips = (S.trips || []).filter(t => t.id !== id); (S.tx || []).forEach(t => { if (t.tripId === id) { t.tripId = ''; t.tripOver = false; } }); save(); closeSheet(); ui.tab = 'trips'; render(); toast('Trip deleted'); } break;
+    case 'tripStatus': { const t = tripById(id); if (!t) break; t.status = el.dataset.v || 'open'; if (t.status === 'reimbursed') { if (t.reimbursedAmt == null) t.reimbursedAmt = tripStats(t).total; if (!t.reimbursedDate) t.reimbursedDate = isoDate(now()); } save(); render(); break; }
+    case 'saveReimb': { const t = tripById(id); if (!t) break; const v = r2(parseFloat(($('#rAmt').value || '').replace(/[$,]/g, ''))); t.reimbursedAmt = v; t.reimbursedDate = $('#rDate').value || isoDate(now()); t.status = 'reimbursed'; save(); render(); toast('Reimbursement saved ✓'); break; }
     case 'saveAdd': saveAdd(id); break;
     case 'tx': sheetAdd(S.tx.find(t => t.id === id)); break;
     case 'delTx': if (confirm('Delete this entry?')) { S.tx = S.tx.filter(t => t.id !== id); save(); closeSheet(); render(); } break;
@@ -662,12 +905,13 @@ document.addEventListener('click', e => {
   }
 });
 function start() {
+  if (S) migrateState(S);
   const ok = !!(S && S.setup);
   $('#setup').style.display = ok ? 'none' : 'flex';
   $('#main').classList.toggle('hidden', !ok); $('#tabs').classList.toggle('hidden', !ok);
   if (ok) { render(); checkFocusAdvance(); }
 }
-window.__budget = { get state() { return S; }, buildExport, render };
+window.__budget = { get state() { return S; }, buildExport, render, migrateState, guessWorkCat, tripStats, txTripId, awaitingReimb, workMonth };
 start();
 })();
 </script>
